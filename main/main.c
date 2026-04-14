@@ -1,5 +1,5 @@
 /**
- * @file LED-manager.c
+ * @file main.c
  * @brief Main file for LED Cube controller.
  *
  * @author William Crow

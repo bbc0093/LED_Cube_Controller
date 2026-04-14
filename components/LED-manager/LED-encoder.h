@@ -40,7 +40,14 @@
  *      - ESP_ERR_NO_MEM out of memory when creating led strip encoder
  *      - ESP_OK if creating encoder successfully
  */
-esp_err_t rmt_new_led_encoder(
+esp_err_t led_encoder_new_rmt(
     uint32_t clock_resolution_hz,
     rmt_encoder_handle_t* ret_encoder);
+
+/**
+ * @brief Clean up the object created by led_encoder_new_rmt
+ *
+ * @param encoder the object to clean up
+ */
+void led_encoder_cleanup_rmt(rmt_encoder_handle_t *encoder);
 #endif //LED_CUBE_CONTROLLER_LED_ENCODER_H

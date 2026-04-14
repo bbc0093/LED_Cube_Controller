@@ -95,7 +95,7 @@ static esp_err_t rmt_led_encoder_reset(rmt_encoder_t *encoder)
     return ESP_OK;
 }
 
-esp_err_t rmt_new_led_encoder(const uint32_t clock_resolution_hz, rmt_encoder_handle_t *ret_encoder)
+esp_err_t led_encoder_new_rmt(const uint32_t clock_resolution_hz, rmt_encoder_handle_t *ret_encoder)
 {
     esp_err_t ret = ESP_OK;
     rmt_led_strip_encoder_t *led_encoder = NULL;
@@ -133,15 +133,25 @@ esp_err_t rmt_new_led_encoder(const uint32_t clock_resolution_hz, rmt_encoder_ha
     };
     *ret_encoder = &led_encoder->base;
     return ESP_OK;
-    err:
-        if (led_encoder) {
-            if (led_encoder->bytes_encoder) {
-                rmt_del_encoder(led_encoder->bytes_encoder);
-            }
-            if (led_encoder->copy_encoder) {
-                rmt_del_encoder(led_encoder->copy_encoder);
-            }
-            free(led_encoder);
+
+err:
+    if (led_encoder) {
+        if (led_encoder->bytes_encoder) {
+            rmt_del_encoder(led_encoder->bytes_encoder);
         }
+        if (led_encoder->copy_encoder) {
+            rmt_del_encoder(led_encoder->copy_encoder);
+        }
+        free(led_encoder);
+    }
     return ret;
+}
+
+void led_encoder_cleanup_rmt(rmt_encoder_handle_t *encoder)
+{
+    rmt_led_strip_encoder_t *led_encoder = __containerof(*encoder, rmt_led_strip_encoder_t, base);
+    rmt_del_encoder(led_encoder->bytes_encoder);
+    rmt_del_encoder(led_encoder->copy_encoder);
+    free(led_encoder);
+    *encoder = nullptr;
 }
