@@ -5,7 +5,7 @@
  *
  * @author William Crow
  * @date 4/5/2026
- * @last_modified 4/5/2026
+ * @last_modified 2026-04-28 00:14:44
  */
 
 /*
@@ -26,7 +26,6 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
-#include "portmacro.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_types.h"
 #include "driver/gpio.h"
@@ -59,17 +58,17 @@
 static const char *TAG = "LED_manager";
 
 struct LED_manager {
-	bool inited;
+	volatile bool inited;
 
-	bool enabled;
+	volatile bool enabled;
 
 	rmt_channel_handle_t handlers[LED_MANAGER_CUBE_FACE_COUNT];
 
 	rmt_encoder_handle_t encoder;
 
 	// For now assume that the handlers do not need a lock, because they are not
-	// being dynamically configured. The init and disabled bools are atomic,
-	// therefore, do not need a lock.
+	// being dynamically configured. The init and enabled bools are volatile so
+	// that cross-task reads always fetch from memory rather than a cached register.
 	SemaphoreHandle_t cache_mutex_lock;
 	led_color_t pixel_cache[LED_MANAGER_CUBE_LED_COUNT];
 
@@ -147,7 +146,7 @@ static void update_led_cache(
  * @note Aborts if offset or offset + length falls outside the valid
  *       cache range.
  */
-static bool led_cache_check(
+[[maybe_unused]] static bool led_cache_check(
 		const int16_t offset,
 		const uint16_t length,
 		const led_color_t *values)
@@ -163,7 +162,7 @@ static bool led_cache_check(
 /**
  * @brief Convert led colors to bytes that can be written to the LEDs.
  *
- * @note  The LED expect colors in GBR.
+ * @note  The LED expect colors in GRB.
  *
  * @param colors the LED manager colors to convert
  * @param len the length of the colors array
@@ -193,9 +192,9 @@ static esp_err_t led_manager_led_color_to_bytes(
 	static_assert(LED_MANAGER_LED_BIT_DEPTH == 8, "This needs to be updated if bit depth is not 8");
 	for (int i = 0, b_i = 0; i < len; i++, b_i += 3) {
 		// No need to mask atm, because we are saving in a uint8_t array.
-		(*bytes)[b_i + 0] = colors[i]; // B
-		(*bytes)[b_i + 1] = colors[i] >> LED_MANAGER_LED_BIT_DEPTH; // G
-		(*bytes)[b_i + 2] = colors[i] >> (LED_MANAGER_LED_BIT_DEPTH * 2); // R
+		(*bytes)[b_i + 0] = colors[i] >> LED_MANAGER_LED_BIT_DEPTH; // G
+		(*bytes)[b_i + 1] = colors[i] >> (LED_MANAGER_LED_BIT_DEPTH * 2); // R
+		(*bytes)[b_i + 2] = colors[i]; // B
 	}
 
 	return ESP_OK;
@@ -258,12 +257,24 @@ void led_manager_uninit(void)
 		abort();
 	}
 
-	led_manager_disable();
+	if (led_manager.enabled) {
+		led_manager_disable();
+	}
 
 	// Wait for any in-flight rmt_tx_cleanup tasks to finish before destroying
 	// channel handles. led_manager_disable() sets enabled=false first, so those
 	// tasks exit their wait loops quickly and decrement the counter.
 	xSemaphoreTake(led_manager.cleanup_drained_sem, portMAX_DELAY);
+	portENTER_CRITICAL(&led_manager.cleanup_spinlock);
+	int pending = led_manager.pending_cleanup_tasks;
+	portEXIT_CRITICAL(&led_manager.cleanup_spinlock);
+	while (pending > 0) {
+		xSemaphoreGive(led_manager.cleanup_drained_sem);
+		xSemaphoreTake(led_manager.cleanup_drained_sem, portMAX_DELAY);
+		portENTER_CRITICAL(&led_manager.cleanup_spinlock);
+		pending = led_manager.pending_cleanup_tasks;
+		portEXIT_CRITICAL(&led_manager.cleanup_spinlock);
+	}
 
 	for (enum LED_manager_cube_face face = 0; face < LED_MANAGER_CUBE_FACE_COUNT; face++) {
 		ESP_ERROR_CHECK(rmt_del_channel(led_manager.handlers[face]));
@@ -296,6 +307,10 @@ static void rmt_tx_cleanup(void *data)
 	esp_err_t ret = ESP_OK;
 
 	for (enum LED_manager_cube_face face = 0; face < LED_MANAGER_CUBE_FACE_COUNT; face++) {
+		// Skip any faces not written in this task
+		if (pixel_arrays[face] == nullptr)
+			continue;
+
 		ret = rmt_tx_wait_all_done(led_manager.handlers[face],
 		                           LED_MANAGER_RMT_WRITE_TIMEOUT);
 		if (unlikely((ret == ESP_ERR_TIMEOUT || ret == ESP_FAIL) && led_manager.enabled == false)) {
@@ -327,22 +342,23 @@ static void rmt_tx_cleanup(void *data)
  * @brief Transmit a contiguous sub-range of the LED pixel cache to all cube
  *        faces via RMT.
  *
- * @param offset Zero-based pixel index within a face's segment of the cache at
- *               which to begin the transmission.
+ * @param offset Zero-based pixel index within the cache at which to begin
+ *               the transmission.
  * @param length Number of pixels to transmit starting at offset.
  *
  * @return
  *      - ESP_OK on success.
  *      - ESP_ERR_NO_MEM if pixel byte buffers could not be allocated.
- *      - Any error forwarded from @ref led_manager_led_color_to_bytes or the
- *        RMT driver.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full (back-pressure:
+ *        caller is submitting updates faster than the hardware can drain them).
+ *      - ESP_FAIL if color conversion fails or the cleanup task cannot be created.
  */
 static esp_err_t rmt_tx_write_leds_from_cache(uint16_t offset, uint16_t length)
 {
 	esp_err_t ret = ESP_OK;
 	enum LED_manager_cube_face start_face, stop_face;
 	// Use calloc so that error handling can check if a child array was allocated.
-	// Allways allocate a pointer for each face, assuming that <6 words of waited RAM
+	// Always allocate a pointer for each face, assuming that <6 words of waisted RAM
 	// is better than the additional logic needed to handle varying lengths.
 	uint8_t **pixel_arrays = calloc(LED_MANAGER_CUBE_FACE_COUNT, sizeof(uint8_t *));
 
@@ -357,17 +373,34 @@ static esp_err_t rmt_tx_write_leds_from_cache(uint16_t offset, uint16_t length)
 
 	for (enum LED_manager_cube_face face = start_face; face <= stop_face; face++) {
 		const led_color_t *colors = &led_manager.pixel_cache[face * LED_MANAGER_PANEL_LED_COUNT];
-		const rmt_transmit_config_t tx_config = {0};
-		ESP_GOTO_ON_ERROR(
-				led_manager_led_color_to_bytes(
-					colors, LED_MANAGER_PANEL_LED_COUNT, &pixel_arrays[face]),
-				err, TAG, "LED color to bytes failed");
+		// queue_nonblocking: return ESP_ERR_NOT_FOUND instead of blocking when
+		// the per-channel queue is full. This prevents holding cache_mutex_lock
+		// for an unbounded time when the caller is updating LEDs faster than
+		// the RMT hardware can drain them.
+		const rmt_transmit_config_t tx_config = {
+			.flags.queue_nonblocking = 1,
+		};
+		if (led_manager_led_color_to_bytes(colors, LED_MANAGER_PANEL_LED_COUNT, &pixel_arrays[face]) != ESP_OK) {
+			ESP_LOGE(TAG, "LED color to bytes failed");
+			for (enum LED_manager_cube_face _face = start_face; _face < face; _face++) {
+				rmt_tx_wait_all_done(led_manager.handlers[_face], portMAX_DELAY);
+			}
+			ret = ESP_FAIL;
+			goto err;
+		}
 		// Flush RGB values to LEDs
-		ESP_ERROR_CHECK(
-				rmt_transmit(led_manager.handlers[face],
-					led_manager.encoder, pixel_arrays[face],
-					LED_MANAGER_PANEL_LED_COUNT * 3,
-					&tx_config));
+		ret = rmt_transmit(led_manager.handlers[face],
+		                   led_manager.encoder, pixel_arrays[face],
+		                   LED_MANAGER_PANEL_LED_COUNT * 3,
+		                   &tx_config);
+		if (unlikely(ret != ESP_OK)) {
+			ESP_LOGE(TAG, "rmt_transmit failed on face %d: %s", face, esp_err_to_name(ret));
+			// Wait for any successfully-started transmissions before freeing buffers.
+			for (enum LED_manager_cube_face _face = start_face; _face < face; _face++) {
+				rmt_tx_wait_all_done(led_manager.handlers[_face], portMAX_DELAY);
+			}
+			goto err;
+		}
 	}
 
 	// Increment before spawning so uninit can't race past the drain check.
@@ -403,16 +436,16 @@ err:
  *
  * Converts the cached pixel data to the GBR byte format expected by the
  * LED strips, kicks off simultaneous RMT transmissions on every face channel,
- * and spawns a cleanup task (@ref rmt_all_cleanup) to free the byte buffers
+ * and spawns a cleanup task (@ref rmt_tx_cleanup) to free the byte buffers
  * once all transfers complete.
  *
  * @return
  *      - ESP_OK on success.
  *      - ESP_ERR_NO_MEM if a pixel byte buffer or the cleanup task could not
  *        be allocated.
- *      - ESP_FAIL if the cache mutex could not be acquired or the cleanup task
- *        could not be created.
- *      - Any error forwarded from @ref led_manager_led_color_to_bytes.
+ *      - ESP_FAIL if the cleanup task could not be created.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full.
+ *      - Any error forwarded from @ref rmt_tx_write_leds_from_cache.
  */
 static esp_err_t rmt_tx_write_all_leds_from_cache(void)
 {
@@ -427,6 +460,11 @@ esp_err_t led_manager_enable(void)
 	if (unlikely(!led_manager.inited)) {
 		ESP_LOGE(TAG, "Tried to enable LED manager when not inited");
 		abort();
+	}
+
+	if (unlikely(led_manager.enabled)) {
+		ESP_LOGE(TAG, "Tried to enable LED manager when already enabled");
+		return ESP_ERR_INVALID_STATE;
 	}
 
 	ESP_LOGI(TAG, "Enabled LED 5V");
@@ -456,18 +494,25 @@ esp_err_t led_manager_enable(void)
 
 	return ESP_OK;
 err:
-	led_manager.enabled = false;
+	// Note: This can only be jumped to after the rmt_enable calls.
+	//       If the rmts are not enabled led_manager_disable() will fail.
 	if (mutex_locked) {
 		xSemaphoreGive(led_manager.cache_mutex_lock);
 	}
+	led_manager_disable();
 	return ret;
 }
 
-void led_manager_disable(void)
+esp_err_t led_manager_disable(void)
 {
 	if (unlikely(!led_manager.inited)) {
 		ESP_LOGE(TAG, "Tried to disable LED manager when not inited");
 		abort();
+	}
+
+	if (unlikely(!led_manager.enabled)) {
+		ESP_LOGE(TAG, "Tried to disable LED manager when not enabled");
+		return ESP_ERR_INVALID_STATE;
 	}
 
 	// This must be set before RMTs are disabled to inform the error handling
@@ -481,6 +526,8 @@ void led_manager_disable(void)
 	ESP_LOGI(TAG, "Disabled LED 5V");
 	ESP_ERROR_CHECK(gpio_set_level(LED_5V5_EN, 0));
 	ESP_LOGI(TAG, "LED manager disabled");
+
+	return ESP_OK;
 }
 
 /**
@@ -516,8 +563,8 @@ static esp_err_t write_dirty_runs(
 	int16_t run_start = -1;
 
 	for (int16_t i = 0; i <= length; i++) {
-		bool pixel_dirty = (i < length) &&
-		                   (force || led_manager.pixel_cache[offset + i] != values[i]);
+		bool pixel_dirty;
+		pixel_dirty = (i < length) && (force || led_manager.pixel_cache[offset + i] != values[i]);
 
 		if (pixel_dirty && run_start == -1) {
 			run_start = i;
@@ -538,6 +585,11 @@ err:
 esp_err_t led_manager_set_pixel(
 		enum LED_manager_cube_face face, uint8_t idx, led_color_t color, bool force)
 {
+	if (unlikely(face >= LED_MANAGER_CUBE_FACE_COUNT || idx >= LED_MANAGER_PANEL_LED_COUNT)) {
+		ESP_LOGE(TAG, "Invalid face %d or idx %d", face, idx);
+		return ESP_ERR_INVALID_ARG;
+	}
+
 	esp_err_t ret = ESP_OK;
 	int16_t offset = LED_MANAGER_P_INDEX_TO_INDEX(face, idx);
 	bool mutex_locked = false;
@@ -574,6 +626,11 @@ err:
 esp_err_t led_manager_set_face(
 		enum LED_manager_cube_face face, led_color_t color, bool force)
 {
+	if (unlikely(face >= LED_MANAGER_CUBE_FACE_COUNT)) {
+		ESP_LOGE(TAG, "Invalid face %d", face);
+		return ESP_ERR_INVALID_ARG;
+	}
+
 	esp_err_t ret = ESP_OK;
 	int16_t offset = LED_MANAGER_P_INDEX_TO_INDEX(face, 0);
 	bool mutex_locked = false;
@@ -645,6 +702,11 @@ esp_err_t led_manager_set_face_from_array(
 		led_color_t color_array[static LED_MANAGER_PANEL_LED_COUNT],
 		bool force)
 {
+	if (unlikely(face >= LED_MANAGER_CUBE_FACE_COUNT)) {
+		ESP_LOGE(TAG, "Invalid face %d", face);
+		return ESP_ERR_INVALID_ARG;
+	}
+
 	esp_err_t ret = ESP_OK;
 	int16_t offset = LED_MANAGER_P_INDEX_TO_INDEX(face, 0);
 	bool mutex_locked = false;

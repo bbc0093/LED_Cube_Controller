@@ -5,7 +5,7 @@
  *
  * @author William Crow
  * @date 4/5/2026
- * @last_modified 4/5/2026
+ * @last_modified 2026-04-27 23:41:46
  */
 
 /*
@@ -113,8 +113,11 @@ void led_manager_uninit(void);
  * @note This will not turn on any of the LEDs unless a color is set.
  *
  * @return
- *      - ESP_ERR_NO_MEM out of memory when set the LEDs to initial values
- *      - ESP_OK on success
+ *      - ESP_OK on success.
+ *      - ESP_ERR_NO_MEM if pixel byte buffers could not be allocated.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full.
+ *      - ESP_FAIL if the cache mutex timed out or the cleanup task could not be created.
+ *      - ESP_ERR_INVALID_STATE if called when the manager is already enabled.
  */
 esp_err_t led_manager_enable(void);
 
@@ -123,8 +126,11 @@ esp_err_t led_manager_enable(void);
  *
  * @note This will release the PM lock.
  * @note All LEDs will be set to off before RMT channels are disabled.
+ *
+ * @return
+ *      - ESP_ERR_INVALID_STATE if called when the manager is not enabled.
  */
-void led_manager_disable(void);
+esp_err_t led_manager_disable(void);
 
 /**
  * @brief Set an individual pixel in the LED manager.
@@ -133,6 +139,13 @@ void led_manager_disable(void);
  * @param idx The index of the pixel to edit.
  * @param color The color to set the pixel to.
  * @param force Bypass the cache and force the RMT transaction.
+ *
+ * @return
+ *      - ESP_OK on success.
+ *      - ESP_ERR_INVALID_ARG if face >= LED_MANAGER_CUBE_FACE_COUNT or idx >= LED_MANAGER_PANEL_LED_COUNT.
+ *      - ESP_ERR_NO_MEM if a pixel byte buffer could not be allocated.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full.
+ *      - ESP_FAIL if the cache mutex timed out or the cleanup task could not be created.
  */
 esp_err_t led_manager_set_pixel(
 		enum LED_manager_cube_face face, uint8_t idx, led_color_t color, bool force);
@@ -143,6 +156,13 @@ esp_err_t led_manager_set_pixel(
  * @param face The face of the cube to edit.
  * @param color The color to set the face to.
  * @param force Bypass the cache and force the RMT transaction.
+ *
+ * @return
+ *      - ESP_OK on success.
+ *      - ESP_ERR_INVALID_ARG if face >= LED_MANAGER_CUBE_FACE_COUNT.
+ *      - ESP_ERR_NO_MEM if a pixel byte buffer could not be allocated.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full.
+ *      - ESP_FAIL if the cache mutex timed out or the cleanup task could not be created.
  */
 esp_err_t led_manager_set_face(enum LED_manager_cube_face face, led_color_t color, bool force);
 
@@ -151,6 +171,12 @@ esp_err_t led_manager_set_face(enum LED_manager_cube_face face, led_color_t colo
  *
  * @param color The color to set the cube to.
  * @param force Bypass the cache and force the RMT transaction.
+ *
+ * @return
+ *      - ESP_OK on success.
+ *      - ESP_ERR_NO_MEM if a pixel byte buffer could not be allocated.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full.
+ *      - ESP_FAIL if the cache mutex timed out or the cleanup task could not be created.
  */
 esp_err_t led_manager_set_all(led_color_t color, bool force);
 
@@ -161,6 +187,12 @@ esp_err_t led_manager_set_all(led_color_t color, bool force);
  *
  * @param color_array array of LED colors to set.
  * @param force Bypass the cache and force the RMT transaction.
+ *
+ * @return
+ *      - ESP_OK on success.
+ *      - ESP_ERR_NO_MEM if a pixel byte buffer could not be allocated.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full.
+ *      - ESP_FAIL if the cache mutex timed out or the cleanup task could not be created.
  */
 esp_err_t led_manager_set_color_from_array(
 		led_color_t color_array[static LED_MANAGER_CUBE_LED_COUNT], bool force);
@@ -171,6 +203,13 @@ esp_err_t led_manager_set_color_from_array(
  * @param face The face of the cube to edit.
  * @param color_array array of LED colors to set.
  * @param force Bypass the cache and force the RMT transaction.
+ *
+ * @return
+ *      - ESP_OK on success.
+ *      - ESP_ERR_INVALID_ARG if face >= LED_MANAGER_CUBE_FACE_COUNT.
+ *      - ESP_ERR_NO_MEM if a pixel byte buffer could not be allocated.
+ *      - ESP_ERR_NOT_FOUND if an RMT TX channel queue is full.
+ *      - ESP_FAIL if the cache mutex timed out or the cleanup task could not be created.
  */
 esp_err_t led_manager_set_face_from_array(
 		enum LED_manager_cube_face face,

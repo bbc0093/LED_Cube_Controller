@@ -6,7 +6,7 @@
  *
  * @author William Crow
  * @date 4/5/2026
- * @last_modified 4/5/2026
+ * @last_modified 2026-04-28 00:14:44
  */
 
 /*
@@ -149,9 +149,6 @@ err:
 
 void led_encoder_cleanup_rmt(rmt_encoder_handle_t *encoder)
 {
-    rmt_led_strip_encoder_t *led_encoder = __containerof(*encoder, rmt_led_strip_encoder_t, base);
-    rmt_del_encoder(led_encoder->bytes_encoder);
-    rmt_del_encoder(led_encoder->copy_encoder);
-    free(led_encoder);
+    rmt_del_encoder(*encoder);
     *encoder = nullptr;
 }
