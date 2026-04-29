@@ -34,6 +34,7 @@
 #include "peripherals.h"
 
 #include "wifi-manager.h"
+#include "status_server.h"
 #include "LED-manager.h"
 #include "icm42688p.h"
 #include "mcp9701a.h"
@@ -440,4 +441,5 @@ void app_main(void)
     ESP_LOGI(TAG, "all peripherals initialized");
 
     wifi_init_sta();
+    status_server_start();
 }

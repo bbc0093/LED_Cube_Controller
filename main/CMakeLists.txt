@@ -1,5 +1,5 @@
 idf_component_register(
-        SRCS "main.c"
+        SRCS "main.c" "status_server.c"
         INCLUDE_DIRS "."
         PRIV_REQUIRES
             wifi-manager
@@ -13,6 +13,7 @@ idf_component_register(
             esp_driver_i2c
             esp_driver_gpio
             esp_adc
+            esp_http_server
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

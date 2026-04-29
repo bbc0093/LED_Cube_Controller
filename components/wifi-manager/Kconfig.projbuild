@@ -1,0 +1,25 @@
+menu "Wi-Fi"
+
+    config WIFI_SSID
+        string "Network SSID"
+        default "myssid"
+        help
+            SSID of the Wi-Fi network to connect to.
+            Set the real value in sdkconfig (gitignored) via idf.py menuconfig.
+
+    config WIFI_PASSWORD
+        string "Network password"
+        default "mypassword"
+        help
+            Wi-Fi password. Leave empty for open networks.
+            Set the real value in sdkconfig (gitignored) via idf.py menuconfig.
+
+    config WIFI_MAX_RETRY
+        int "Maximum connection retries"
+        default 5
+        range 1 20
+        help
+            Number of reconnection attempts before the driver gives up and sets
+            the WIFI_FAIL_BIT event group bit.
+
+endmenu

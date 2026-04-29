@@ -1,1 +1,8 @@
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+
+# Wi-Fi credentials — override these in sdkconfig via: idf.py menuconfig
+# sdkconfig is gitignored; this file (sdkconfig.defaults) is committed with
+# safe placeholder values so the build always has a default.
+CONFIG_WIFI_SSID="your_ssid_here"
+CONFIG_WIFI_PASSWORD="your_password_here"
+CONFIG_WIFI_MAX_RETRY=5
