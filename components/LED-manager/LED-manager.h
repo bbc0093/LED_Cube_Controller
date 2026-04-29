@@ -29,6 +29,18 @@
 
 #include <stdint.h>
 #include "esp_err.h"
+#include "driver/gpio.h"
+
+// One data GPIO per cube face (WS2812B RMT) plus a power-enable output.
+typedef struct {
+    gpio_num_t top_pin;
+    gpio_num_t bottom_pin;
+    gpio_num_t left_pin;
+    gpio_num_t right_pin;
+    gpio_num_t front_pin;
+    gpio_num_t back_pin;
+    gpio_num_t pwr_en_pin;  // Active-high; gates 5 V to all LED panels.
+} led_manager_config_t;
 
 enum LED_manager_cube_face {
 	LED_MANAGER_CUBE_FACE_TOP = 0,
@@ -91,12 +103,14 @@ static_assert(LED_MANAGER_LED_BIT_DEPTH * 3 <= sizeof(led_color_t) * 8,
 	((panel) * LED_MANAGER_PANEL_LED_COUNT + (index))
 
 /**
- * @brief Initialize the LED manager
+ * @brief Initialize the LED manager.
  *
- * @note The manger initializes in the disabled state. led_manager_enable()
+ * @param config GPIO assignments and power-enable pin.  Must not be NULL.
+ *
+ * @note The manager initializes in the disabled state. led_manager_enable()
  *       must be called before the panels are accessed.
  */
-void led_manager_init(void);
+void led_manager_init(const led_manager_config_t *config);
 
 /**
  * @brief Cleanup and being down the LED manager.

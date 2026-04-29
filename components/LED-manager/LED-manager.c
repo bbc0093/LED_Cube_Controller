@@ -41,14 +41,6 @@
 
 #define RMT_LED_PANEL_RESOLUTION_HZ (10*1000*1000) // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
 
-#define RMT_LED_PANEL_BOT_GPIO_NUM   GPIO_NUM_39
-#define RMT_LED_PANEL_TOP_GPIO_NUM   GPIO_NUM_45
-#define RMT_LED_PANEL_LEFT_GPIO_NUM  GPIO_NUM_43
-#define RMT_LED_PANEL_RIGHT_GPIO_NUM GPIO_NUM_40
-#define RMT_LED_PANEL_FRONT_GPIO_NUM GPIO_NUM_44
-#define RMT_LED_PANEL_BACK_GPIO_NUM  GPIO_NUM_38
-
-#define LED_5V5_EN GPIO_NUM_46
 
 // Guesstimate of ~10ms to update all the LEDs on the cube. (Done in parallel so probably faster.)
 // 50ms should be plenty of time for the mutex lock
@@ -61,6 +53,9 @@ struct LED_manager {
 	volatile bool inited;
 
 	volatile bool enabled;
+
+	gpio_num_t face_pins[LED_MANAGER_CUBE_FACE_COUNT];
+	gpio_num_t pwr_en_pin;
 
 	rmt_channel_handle_t handlers[LED_MANAGER_CUBE_FACE_COUNT];
 
@@ -90,24 +85,11 @@ static struct LED_manager led_manager = {0};
  */
 static gpio_num_t panel_enum_to_gpio_num(enum LED_manager_cube_face panel_enum)
 {
-	switch (panel_enum) {
-	case LED_MANAGER_CUBE_FACE_TOP:
-		return RMT_LED_PANEL_TOP_GPIO_NUM;
-	case LED_MANAGER_CUBE_FACE_BOTTOM:
-		return RMT_LED_PANEL_BOT_GPIO_NUM;
-	case LED_MANAGER_CUBE_FACE_LEFT:
-		return RMT_LED_PANEL_LEFT_GPIO_NUM;
-	case LED_MANAGER_CUBE_FACE_RIGHT:
-		return RMT_LED_PANEL_RIGHT_GPIO_NUM;
-	case LED_MANAGER_CUBE_FACE_FRONT:
-		return RMT_LED_PANEL_FRONT_GPIO_NUM;
-	case LED_MANAGER_CUBE_FACE_BACK:
-		return RMT_LED_PANEL_BACK_GPIO_NUM;
-	case LED_MANAGER_CUBE_FACE_COUNT:
-		break;
+	if (panel_enum < LED_MANAGER_CUBE_FACE_COUNT) {
+		return led_manager.face_pins[panel_enum];
 	}
 	ESP_LOGE(TAG, "Invalid panel_enum: %d", panel_enum);
-	return GPIO_NUM_NC; // Not connected
+	return GPIO_NUM_NC;
 }
 
 /**
@@ -200,12 +182,20 @@ static esp_err_t led_manager_led_color_to_bytes(
 	return ESP_OK;
 }
 
-void led_manager_init(void)
+void led_manager_init(const led_manager_config_t *config)
 {
 	if (unlikely(led_manager.inited)) {
 		ESP_LOGE(TAG, "Tried to init LED manager when already inited");
 		abort();
 	}
+
+	led_manager.face_pins[LED_MANAGER_CUBE_FACE_TOP]    = config->top_pin;
+	led_manager.face_pins[LED_MANAGER_CUBE_FACE_BOTTOM] = config->bottom_pin;
+	led_manager.face_pins[LED_MANAGER_CUBE_FACE_LEFT]   = config->left_pin;
+	led_manager.face_pins[LED_MANAGER_CUBE_FACE_RIGHT]  = config->right_pin;
+	led_manager.face_pins[LED_MANAGER_CUBE_FACE_FRONT]  = config->front_pin;
+	led_manager.face_pins[LED_MANAGER_CUBE_FACE_BACK]   = config->back_pin;
+	led_manager.pwr_en_pin = config->pwr_en_pin;
 
 	ESP_LOGI(TAG, "Create RMT TX channels");
 	for (enum LED_manager_cube_face face = 0; face < LED_MANAGER_CUBE_FACE_COUNT; face++) {
@@ -225,7 +215,7 @@ void led_manager_init(void)
 
 	ESP_LOGI(TAG, "Setup LED 5V Enable");
 	gpio_config_t io_conf = {
-		.pin_bit_mask = 1ULL << LED_5V5_EN, // choose your pin
+		.pin_bit_mask = 1ULL << led_manager.pwr_en_pin,
 		.mode         = GPIO_MODE_OUTPUT,
 	};
 	ESP_ERROR_CHECK(gpio_config(&io_conf));
@@ -468,7 +458,7 @@ esp_err_t led_manager_enable(void)
 	}
 
 	ESP_LOGI(TAG, "Enabled LED 5V");
-	ESP_ERROR_CHECK(gpio_set_level(LED_5V5_EN, 1));
+	ESP_ERROR_CHECK(gpio_set_level(led_manager.pwr_en_pin, 1));
 
 	ESP_LOGI(TAG, "Enable RMT TX channels");
 	for (enum LED_manager_cube_face face = 0; face < LED_MANAGER_CUBE_FACE_COUNT; face++) {
@@ -524,7 +514,7 @@ esp_err_t led_manager_disable(void)
 		ESP_ERROR_CHECK(rmt_disable(led_manager.handlers[face]));
 	}
 	ESP_LOGI(TAG, "Disabled LED 5V");
-	ESP_ERROR_CHECK(gpio_set_level(LED_5V5_EN, 0));
+	ESP_ERROR_CHECK(gpio_set_level(led_manager.pwr_en_pin, 0));
 	ESP_LOGI(TAG, "LED manager disabled");
 
 	return ESP_OK;
