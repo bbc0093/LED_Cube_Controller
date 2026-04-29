@@ -35,6 +35,9 @@
 
 #include "wifi-manager.h"
 #include "status_server.h"
+#include "led_modes.h"
+#include "mode_bst.h"
+#include "mode_imu_test.h"
 #include "LED-manager.h"
 #include "icm42688p.h"
 #include "mcp9701a.h"
@@ -231,6 +234,14 @@ static void init_led_manager(void)
     ESP_LOGI(TAG, "LED manager ready");
 }
 
+static void init_led_modes(void)
+{
+    ESP_ERROR_CHECK(led_mode_manager_register(&mode_bst));
+    ESP_ERROR_CHECK(led_mode_manager_register(&mode_imu_test));
+    ESP_ERROR_CHECK(led_mode_manager_start());
+    ESP_LOGI(TAG, "LED mode manager started (mode: %s)", led_mode_manager_current_name());
+}
+
 static void init_imu(void)
 {
     icm42688p_config_t cfg = {
@@ -424,6 +435,7 @@ void app_main(void)
     // Bring up peripherals in dependency order.
     init_i2c_bus();
     init_led_manager();
+    init_led_modes();
     init_imu();
     init_thermistors();
     init_temp_sensor();

@@ -3,6 +3,7 @@ idf_component_register(
         INCLUDE_DIRS "."
         PRIV_REQUIRES
             wifi-manager
+            led-modes
             LED-manager
             icm42688p
             mcp9701a

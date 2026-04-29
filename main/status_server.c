@@ -1,10 +1,12 @@
 /**
  * @file status_server.c
- * @brief HTTP status page — serves live sensor data over Wi-Fi.
+ * @brief HTTP status page — serves live sensor data and mode control over Wi-Fi.
  *
  * Routes:
- *   GET /           HTML dashboard; JavaScript polls /api/status every 2 s.
- *   GET /api/status JSON snapshot of all sensor readings.
+ *   GET /              HTML dashboard; polls /api/status every 2 s.
+ *   GET /api/status    JSON snapshot of all sensor readings + current mode.
+ *   GET /api/modes     JSON list of available modes and the active one.
+ *   GET /api/set_mode?id=N  Switch to mode N; returns {"ok":true}.
  *
  * @author William Crow
  * @date 2026-04-29
@@ -17,6 +19,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_http_server.h"
@@ -27,6 +30,7 @@
 #include "mcp9701a.h"
 #include "max17049.h"
 #include "bq25731.h"
+#include "led_modes.h"
 
 #include "status_server.h"
 
@@ -43,7 +47,8 @@ static const char *TAG = "status_server";
 #define THERM_RIGHT   7
 
 // ── HTML page ────────────────────────────────────────────────────────────────
-// Served once; JavaScript fetches /api/status every 2 s and updates the DOM.
+// Served once on GET /; JS polls /api/status every 2 s and fetches
+// /api/modes once on load to build the mode-switcher buttons.
 
 static const char STATUS_HTML[] =
     "<!DOCTYPE html>"
@@ -63,23 +68,65 @@ static const char STATUS_HTML[] =
     ".lbl{color:#555;font-size:.75em;margin-bottom:2px}"
     ".val{font-size:1.25em;color:#00d4ff}"
     ".ok{color:#4caf50}.warn{color:#ff9800}.err{color:#f44336}"
+    ".modes{display:flex;gap:8px;flex-wrap:wrap}"
+    ".btn{background:#16213e;border:1px solid #333;color:#7eb8f7;"
+    "     border-radius:6px;padding:8px 18px;cursor:pointer;"
+    "     font-family:monospace;font-size:.9em;transition:border-color .15s,color .15s}"
+    ".btn:hover{border-color:#00d4ff;color:#00d4ff}"
+    ".btn.active{border-color:#00d4ff;color:#0d0d1a;background:#00d4ff}"
     "#ts{color:#444;font-size:.72em;margin-top:20px}"
     "</style>"
     "</head>"
     "<body>"
     "<h1>LED Cube</h1>"
+    "<h2>Mode</h2><div class=\"modes\" id=\"s-modes\"></div>"
     "<h2>Battery</h2><div class=\"grid\" id=\"s-bat\"></div>"
     "<h2>Charger</h2><div class=\"grid\" id=\"s-chg\"></div>"
     "<h2>Temperatures</h2><div class=\"grid\" id=\"s-tmp\"></div>"
     "<p id=\"ts\"></p>"
     "<script>"
+    "let curMode=0;"
+
+    // Build / rebuild mode buttons, highlighting the active one.
+    "function buildBtns(names,active){"
+    "curMode=active;"
+    "document.getElementById('s-modes').innerHTML=names.map((n,i)=>"
+    "  `<button class=\"btn${i===active?' active':''}\" onclick=\"setMode(${i})\">${n}</button>`"
+    ").join('');"
+    "}"
+
+    // Switch mode: POST to API, then update button highlights immediately.
+    "async function setMode(id){"
+    "  try{"
+    "    await fetch('/api/set_mode?id='+id);"
+    "    curMode=id;"
+    "    document.querySelectorAll('#s-modes .btn').forEach((b,i)=>"
+    "      b.classList.toggle('active',i===id));"
+    "  }catch(e){}"
+    "}"
+
+    // Fetch mode list once on load.
+    "async function loadModes(){"
+    "  try{"
+    "    const d=await(await fetch('/api/modes')).json();"
+    "    buildBtns(d.names,d.current);"
+    "  }catch(e){}"
+    "}"
+
     "function c(l,v,k){"
     "  return '<div class=\"card\"><div class=\"lbl\">'+l+'</div>"
              "<div class=\"val '+(k||'')+'\">'+v+'</div></div>';"
     "}"
+
+    // Poll sensor data every 2 s; also sync the active-mode highlight.
     "async function poll(){"
     "  try{"
     "    const d=await(await fetch('/api/status')).json();"
+    "    if(d.current_mode!==curMode){"
+    "      curMode=d.current_mode;"
+    "      document.querySelectorAll('#s-modes .btn').forEach((b,i)=>"
+    "        b.classList.toggle('active',i===curMode));"
+    "    }"
     "    const b=d.battery;"
     "    document.getElementById('s-bat').innerHTML="
     "      c('State of Charge',b.soc_pct.toFixed(1)+' %',"
@@ -114,7 +161,7 @@ static const char STATUS_HTML[] =
     "    document.getElementById('ts').textContent='Error: '+e;"
     "  }"
     "}"
-    "poll();setInterval(poll,2000);"
+    "loadModes();poll();setInterval(poll,2000);"
     "</script>"
     "</body>"
     "</html>";
@@ -123,7 +170,6 @@ static const char STATUS_HTML[] =
 
 static esp_err_t api_status_handler(httpd_req_t *req)
 {
-    // Read all sensors; substitute 0 on error so the JSON is always valid.
     tmp102_data_t pcb = {0};
     tmp102_read(&pcb);
 
@@ -139,9 +185,10 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     bq25731_adc_t chg_adc = {0};
     bq25731_read_adc(&chg_adc);
 
-    char buf[768];
+    char buf[800];
     int len = snprintf(buf, sizeof(buf),
         "{"
+          "\"current_mode\":%d,"
           "\"pcb_temp_c\":%.2f,"
           "\"therm\":{"
             "\"bat0_c\":%.1f,\"bat1_c\":%.1f,"
@@ -158,6 +205,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
             "\"ichg_a\":%.2f,\"idchg_a\":%.2f,\"iin_a\":%.2f,\"psys_v\":%.2f"
           "}"
         "}",
+        (int)led_mode_manager_current_id(),
         pcb.temperature_c,
         therm[THERM_BAT0].temperature_c,   therm[THERM_BAT1].temperature_c,
         therm[THERM_FRONT].temperature_c,  therm[THERM_BACK].temperature_c,
@@ -175,6 +223,55 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ── /api/modes handler ────────────────────────────────────────────────────────
+
+static esp_err_t api_modes_handler(httpd_req_t *req)
+{
+    char buf[256];
+    int count = led_mode_manager_mode_count();
+    int len = snprintf(buf, sizeof(buf),
+                       "{\"count\":%d,\"current\":%d,\"names\":[",
+                       count, (int)led_mode_manager_current_id());
+
+    for (int i = 0; i < count && len < (int)sizeof(buf) - 4; i++) {
+        const char *name = led_mode_manager_get_name((led_mode_id_t)i);
+        len += snprintf(buf + len, sizeof(buf) - len,
+                        "%s\"%s\"", i > 0 ? "," : "", name ? name : "");
+    }
+    len += snprintf(buf + len, sizeof(buf) - len, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+// ── /api/set_mode handler ─────────────────────────────────────────────────────
+
+static esp_err_t api_set_mode_handler(httpd_req_t *req)
+{
+    char query[32];
+    char id_str[8];
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "id", id_str, sizeof(id_str)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing id parameter");
+        return ESP_OK;
+    }
+
+    int id = atoi(id_str);
+    if (id < 0 || id >= led_mode_manager_mode_count()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id out of range");
+        return ESP_OK;
+    }
+
+    esp_err_t err = led_mode_manager_set_mode((led_mode_id_t)id);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, err == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false}");
+    return ESP_OK;
+}
+
 // ── / handler ─────────────────────────────────────────────────────────────────
 
 static esp_err_t root_handler(httpd_req_t *req)
@@ -189,7 +286,8 @@ static esp_err_t root_handler(httpd_req_t *req)
 void status_server_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size = 8192;
+    cfg.stack_size       = 8192;
+    cfg.max_uri_handlers = 8;
 
     httpd_handle_t server;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -197,19 +295,15 @@ void status_server_start(void)
         return;
     }
 
-    static const httpd_uri_t route_root = {
-        .uri     = "/",
-        .method  = HTTP_GET,
-        .handler = root_handler,
+    static const httpd_uri_t routes[] = {
+        { .uri = "/",              .method = HTTP_GET, .handler = root_handler       },
+        { .uri = "/api/status",    .method = HTTP_GET, .handler = api_status_handler  },
+        { .uri = "/api/modes",     .method = HTTP_GET, .handler = api_modes_handler   },
+        { .uri = "/api/set_mode",  .method = HTTP_GET, .handler = api_set_mode_handler},
     };
-    static const httpd_uri_t route_api = {
-        .uri     = "/api/status",
-        .method  = HTTP_GET,
-        .handler = api_status_handler,
-    };
-
-    httpd_register_uri_handler(server, &route_root);
-    httpd_register_uri_handler(server, &route_api);
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        httpd_register_uri_handler(server, &routes[i]);
+    }
 
     ESP_LOGI(TAG, "HTTP server started — http://<device-ip>/");
 }
